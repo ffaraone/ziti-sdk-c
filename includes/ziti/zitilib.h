@@ -26,6 +26,9 @@ extern "C" {
 
 #include <stdint.h>
 
+/* forward-declare uv_loop_t so callers don't have to include <uv.h> */
+typedef struct uv_loop_s uv_loop_t;
+
 typedef uint32_t ziti_handle_t;
 #define ZITI_INVALID_HANDLE ((ziti_handle_t)-1)
 
@@ -45,6 +48,16 @@ typedef int ziti_socket_t;
  */
 ZITI_FUNC
 void Ziti_lib_init(void);
+
+/**
+ * Initialize Ziti library using an existing libuv loop.
+ * If `loop` is NULL this behaves the same as Ziti_lib_init().
+ * When an external loop is provided, zitilib will attach to it and will NOT
+ * create or run its own background thread or stop the provided loop on
+ * shutdown. Caller keeps ownership of the loop lifecycle.
+ */
+ZITI_FUNC
+void Ziti_lib_init_with_loop(uv_loop_t *loop);
 
 /**
  * @brief return Ziti error code for last failed operation.

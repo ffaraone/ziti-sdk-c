@@ -69,6 +69,7 @@ static void do_timeout_cleanup(void *args, future_t *f, uv_loop_t *l);
 static uv_once_t init;
 static uv_loop_t *lib_loop;
 static uv_thread_t lib_thread;
+static bool lib_loop_external = false;
 static uv_key_t err_key;
 static uv_mutex_t q_mut;
 static uv_async_t q_async;
@@ -127,6 +128,25 @@ static model_map ziti_contexts;
 static model_map ziti_sockets;
 
 void Ziti_lib_init(void) {
+    Ziti_lib_init_with_loop(NULL);
+}
+
+ZITI_FUNC
+void Ziti_lib_init_with_loop(uv_loop_t *loop) {
+    if (loop == NULL) {
+        /* legacy path: ensure one-time init will create an internal loop */
+        uv_once(&init, internal_init);
+        return;
+    }
+
+    /* mark external loop and attach before running one-time init
+       so internal_init can skip creating its own loop */
+    lib_loop = loop;
+    lib_loop_external = true;
+
+    /* run one-time init (will initialize keys/mutex but won't create a loop)
+       internal_init will initialize logging and async on lib_loop when
+       lib_loop_external is true */
     uv_once(&init, internal_init);
 }
 
@@ -1142,7 +1162,9 @@ ziti_socket_t Ziti_accept(ziti_socket_t server, char *caller, int caller_len) {
 void Ziti_lib_shutdown(void) {
     future_t *f = schedule_on_loop(do_shutdown, NULL, true);
     await_future(f, NULL);
-    uv_thread_join(&lib_thread);
+    if (!lib_loop_external) {
+        uv_thread_join(&lib_thread);
+    }
     uv_once_t child_once = UV_ONCE_INIT;
     memcpy(&init, &child_once, sizeof(child_once));
     uv_key_delete(&err_key);
@@ -1208,6 +1230,11 @@ static void child_load_contexts(void *load_list, future_t *f, uv_loop_t *l) {
 }
 
 static void child_init() {
+    /* create and run internal loop only when not using external loop */
+    if (lib_loop_external) {
+        return;
+    }
+
     lib_loop = uv_loop_new();
     memset(&loop_q, 0, sizeof(loop_q));
     ziti_log_init(lib_loop, -1, NULL);
@@ -1233,6 +1260,15 @@ static void internal_init() {
     init_in4addr_loopback();
     uv_key_create(&err_key);
     uv_mutex_init(&q_mut);
+    /* If an external loop was provided before internal_init ran, attach to it
+       and initialize logging/async on that loop. Otherwise, create our own
+       internal loop and thread. */
+    if (lib_loop_external && lib_loop != NULL) {
+        ziti_log_init(lib_loop, -1, NULL);
+        uv_async_init(lib_loop, &q_async, process_on_loop);
+        return;
+    }
+
     lib_loop = uv_loop_new();
     ziti_log_init(lib_loop, -1, NULL);
     uv_async_init(lib_loop, &q_async, process_on_loop);
@@ -1252,7 +1288,9 @@ void do_shutdown(void *args, future_t *f, uv_loop_t *l) {
     complete_future(f, NULL, 0);
     uv_close((uv_handle_t *) &q_async, NULL);
 
-    uv_stop(q_async.loop);
+    if (!lib_loop_external) {
+        uv_stop(q_async.loop);
+    }
 }
 
 void do_timeout_cleanup(void *args, future_t *f, uv_loop_t *l) {
